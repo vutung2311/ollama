@@ -35,9 +35,8 @@ const (
 	DRMUsedMemoryFile  = "mem_info_vram_used"
 
 	// In hex; properties file is in decimal
-	DRMUniqueIDFile = "unique_id"
-	DRMVendorFile   = "vendor"
-	DRMDeviceFile   = "device"
+	DRMVendorFile = "vendor"
+	DRMDeviceFile = "device"
 )
 
 var (
@@ -106,10 +105,19 @@ func AMDGetGPUInfo() ([]RocmGPUInfo, error) {
 		}
 		defer fp.Close()
 
+		var kfdNodeID uint64
+		nodeIDString := filepath.Base(filepath.Dir(match))
+		// values here are in hex, strip off the lead 0x and parse so we can compare the numeric (decimal) values in amdgpu
+		kfdNodeID, err = strconv.ParseUint(strings.TrimSpace(nodeIDString), 10, 64)
+		if err != nil {
+			slog.Debug("failed to parse node id", "file", match, "error", err)
+			break
+		}
+
 		scanner := bufio.NewScanner(fp)
 		isCPU := false
 		var major, minor, patch uint64
-		var vendor, device, uniqueID uint64
+		var vendor, device, uniqueID, locationID uint64
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			// Note: we could also use "cpu_cores_count X" where X is greater than zero to detect CPUs
@@ -167,6 +175,16 @@ func AMDGetGPUInfo() ([]RocmGPUInfo, error) {
 				if err != nil {
 					slog.Debug("malformed", "unique_id", line, "error", err)
 				}
+			} else if strings.HasPrefix(line, "location_id") {
+				ver := strings.Fields(line)
+				if len(ver) != 2 {
+					slog.Debug("malformed", "location_id", line)
+					continue
+				}
+				locationID, err = strconv.ParseUint(ver[1], 10, 64)
+				if err != nil {
+					slog.Debug("malformed", "location_id", line, "error", err)
+				}
 			}
 			// TODO - any other properties we want to extract and record?
 			// vendor_id + device_id -> pci lookup for "Name"
@@ -201,9 +219,18 @@ func AMDGetGPUInfo() ([]RocmGPUInfo, error) {
 		}{
 			{vendor, DRMVendorFile},
 			{device, DRMDeviceFile},
-			{uniqueID, DRMUniqueIDFile}, // Not all devices will report this
 		}
-		slog.Debug("mapping amdgpu to drm sysfs nodes", "amdgpu", match, "vendor", vendor, "device", device, "unique_id", uniqueID)
+		slog.Debug(
+			"mapping amdgpu to drm sysfs nodes",
+			"amdgpu",
+			match,
+			"vendor",
+			vendor,
+			"device",
+			device,
+			"location_id",
+			locationID,
+		)
 		// Map over to DRM location to find the total/free memory
 		drmMatches, _ := filepath.Glob(DRMDeviceDirGlob)
 		for _, devDir := range drmMatches {
@@ -230,6 +257,31 @@ func AMDGetGPUInfo() ([]RocmGPUInfo, error) {
 				if cmp != m.id {
 					matched = false
 					break
+				}
+			}
+			if matched {
+				symLink, err := filepath.EvalSymlinks(devDir)
+				if err != nil {
+					slog.Debug("failed to find symlink for sysfs node", "file", devDir, "error", err)
+					matched = false
+				}
+				pciAddress := filepath.Base(symLink)
+				var (
+					domain, bus, slot, fn uint64
+				)
+				_, err = fmt.Sscanf(pciAddress, "%x:%x:%x.%x", &domain, &bus, &slot, &fn)
+				if err != nil {
+					slog.Debug("failed to parse PCI address", "file", devDir, "error", err)
+					matched = false
+				}
+				// reference from include/uapi/linux/pci.h
+				devFn := ((slot & 0x1f) << 3) | (fn & 0x07)
+				// reference from /include/linux/pci.h
+				devId := (bus << 8) | devFn
+				locationIDMatched := locationID == devId
+				locationIDMatchedWithGpuId := locationID == devId|kfdNodeID
+				if !locationIDMatched && !locationIDMatchedWithGpuId {
+					matched = false
 				}
 			}
 			if !matched {
