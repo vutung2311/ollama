@@ -154,26 +154,26 @@ static int ggml_cuda_parse_id(char devName[]) {
     int archMinor = 0x0;
     int archNum = GGML_CUDA_CC_OFFSET_AMD;
     int archLen = strlen(devName);
-    char archName[archLen + 1];
+    std::vector<char> archName(archLen + 1);
 
     // strip leading 'gfx' while copying into our buffer
     if (archLen > 3) {
-        strcpy(archName, &devName[3]);
+        strcpy(archName.data(), &devName[3]);
         archLen -= 3;
     }
 
     // trim trailing :xnack- or :sramecc- statuses
-    archLen = strcspn(archName, ":");
+    archLen = strcspn(archName.data(), ":");
     archName[archLen] = '\0';
 
     // tease out the version information
     if (archLen > 8) {
         // versions labeled generic use '-' as delimiter
         // strip the trailing "-generic" then iterate through what remains
-        if ((strstr(archName, "-generic"))) {
+        if ((strstr(archName.data(), "-generic"))) {
             archName[archLen - 8] = '\0';
             char * pch;
-            if ((pch = strtok(archName, "-"))) {
+            if ((pch = strtok(archName.data(), "-"))) {
                 archMajor = (int)strtoul(pch, 0, 16);
                 if ((pch = strtok(NULL, "-"))) {
                     archMinor = 0x10 * (int)strtoul(pch, 0, 16);
@@ -186,7 +186,7 @@ static int ggml_cuda_parse_id(char devName[]) {
         archName[archLen - 2] = '\0';
 
         // only the major version remains
-        archMajor = (int)strtoul(archName, 0, 16);
+        archMajor = (int)strtoul(archName.data(), 0, 16);
     }
     archNum += archMajor * 0x100;
     archNum += archMinor;
