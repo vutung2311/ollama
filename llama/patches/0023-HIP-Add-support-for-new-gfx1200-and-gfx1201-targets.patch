@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tung Vu <vutung.ct@gmail.com>
+Date: Sat, 15 Mar 2025 12:47:48 +0700
+Subject: [PATCH] HIP: Add support for new gfx1200 and gfx1201 targets
+
+---
+ docs/build.md                    |  2 +-
+ ggml/src/ggml-cuda/common.cuh    |  8 +++++---
+ ggml/src/ggml-cuda/ggml-cuda.cu  | 12 +++++++++---
+ ggml/src/ggml-cuda/mmq.cu        |  2 +-
+ ggml/src/ggml-cuda/mmq.cuh       |  4 ++--
+ ggml/src/ggml-cuda/mmvq.cu       |  4 ++--
+ ggml/src/ggml-cuda/vendors/hip.h |  4 ++++
+ 7 files changed, 24 insertions(+), 12 deletions(-)
+
+diff --git a/docs/build.md b/docs/build.md
+index b3ecf043..26057c5a 100644
+--- a/docs/build.md
++++ b/docs/build.md
+@@ -189,7 +189,7 @@ The following compilation options are also available to tweak performance:
+ 
+ | Option                        | Legal values           | Default | Description                                                                                                                                                                                                                                                                             |
+ |-------------------------------|------------------------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+-| GGML_CUDA_FORCE_MMQ           | Boolean                | false   | Force the use of custom matrix multiplication kernels for quantized models instead of FP16 cuBLAS even if there is no int8 tensor core implementation available (affects V100, RDNA3). MMQ kernels are enabled by default on GPUs with int8 tensor core support. With MMQ force enabled, speed for large batch sizes will be worse but VRAM consumption will be lower.                       |
++| GGML_CUDA_FORCE_MMQ           | Boolean                | false   | Force the use of custom matrix multiplication kernels for quantized models instead of FP16 cuBLAS even if there is no int8 tensor core implementation available (affects V100, RDNA3, RDNA4). MMQ kernels are enabled by default on GPUs with int8 tensor core support. With MMQ force enabled, speed for large batch sizes will be worse but VRAM consumption will be lower.                       |
+ | GGML_CUDA_FORCE_CUBLAS        | Boolean                | false   | Force the use of FP16 cuBLAS instead of custom matrix multiplication kernels for quantized models                                                                                                                                                                                       |
+ | GGML_CUDA_F16                 | Boolean                | false   | If enabled, use half-precision floating point arithmetic for the CUDA dequantization + mul mat vec kernels and for the q4_1 and q5_1 matrix matrix multiplication kernels. Can improve performance on relatively recent GPUs.                                                           |
+ | GGML_CUDA_PEER_MAX_BATCH_SIZE | Positive integer       | 128     | Maximum batch size for which to enable peer access between multiple GPUs. Peer access requires either Linux or NVLink. When using NVLink enabling peer access for larger batch sizes is potentially beneficial.                                                                         |
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index adf0d3ec..031aaa8e 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -49,7 +49,7 @@
+ #define GGML_CUDA_CC_ADA_LOVELACE 890
+ #define GGML_CUDA_CC_OFFSET_AMD   0x1000000
+ 
+-// GCN/CNDA, wave size is 64
++// GCN/CDNA, wave size is 64
+ #define GGML_CUDA_CC_GCN4       (GGML_CUDA_CC_OFFSET_AMD + 0x803)  // Tonga, Fiji, Polaris, minimum for fast fp16
+ #define GGML_CUDA_CC_VEGA       (GGML_CUDA_CC_OFFSET_AMD + 0x900)  // Vega56/64, minimum for fp16 dual issue
+ #define GGML_CUDA_CC_VEGA20     (GGML_CUDA_CC_OFFSET_AMD + 0x906)  // MI50/Radeon VII, minimum for dp4a
+@@ -57,15 +57,17 @@
+ #define GGML_CUDA_CC_CDNA2      (GGML_CUDA_CC_OFFSET_AMD + 0x910)  // MI210, minimum acc register renameing
+ #define GGML_CUDA_CC_CDNA3      (GGML_CUDA_CC_OFFSET_AMD + 0x942)  // MI300
+ 
+-// RNDA removes MFMA, dp4a, xnack, acc registers, wave size is 32
++// RDNA removes MFMA, dp4a, xnack, acc registers, wave size is 32
+ #define GGML_CUDA_CC_RDNA1      (GGML_CUDA_CC_OFFSET_AMD + 0x1010) // RX 5000
+ #define GGML_CUDA_CC_RDNA2      (GGML_CUDA_CC_OFFSET_AMD + 0x1030) // RX 6000, minimum for dp4a
+ #define GGML_CUDA_CC_RDNA3      (GGML_CUDA_CC_OFFSET_AMD + 0x1100) // RX 7000, minimum for WMMA
++#define GGML_CUDA_CC_RDNA4      (GGML_CUDA_CC_OFFSET_AMD + 0x1200) // RX 9000
+ 
+ #define GGML_CUDA_CC_IS_RDNA(cc)  (cc >= GGML_CUDA_CC_RDNA1)
+ #define GGML_CUDA_CC_IS_RDNA1(cc) (cc >= GGML_CUDA_CC_RDNA1 && cc < GGML_CUDA_CC_RDNA2)
+ #define GGML_CUDA_CC_IS_RDNA2(cc) (cc >= GGML_CUDA_CC_RDNA2 && cc < GGML_CUDA_CC_RDNA3)
+ #define GGML_CUDA_CC_IS_RDNA3(cc) (cc >= GGML_CUDA_CC_RDNA3)
++#define GGML_CUDA_CC_IS_RDNA4(cc) (cc >= GGML_CUDA_CC_RDNA4)
+ #define GGML_CUDA_CC_IS_GCN(cc)   (cc > GGML_CUDA_CC_OFFSET_AMD && cc < GGML_CUDA_CC_CDNA)
+ #define GGML_CUDA_CC_IS_CDNA(cc)  (cc >= GGML_CUDA_CC_CDNA && cc < GGML_CUDA_CC_RDNA1)
+ 
+@@ -386,7 +388,7 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
+ #if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
+ #if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(RDNA2)
+     c = __builtin_amdgcn_sdot4(a, b, c, false);
+-#elif defined(RDNA3)
++#elif defined(RDNA3) || defined(RDNA4)
+     c = __builtin_amdgcn_sudot4( true, a, true, b, c, false);
+ #elif defined(__gfx1010__) || defined(__gfx900__)
+     int tmp1;
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index da78cee5..16e43deb 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1213,7 +1213,7 @@ static void ggml_cuda_op_mul_mat_cublas(
+ 
+         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
+ 
+-        if (GGML_CUDA_CC_IS_CDNA(compute_capability)) {
++        if (GGML_CUDA_CC_IS_CDNA(compute_capability) || GGML_CUDA_CC_IS_RDNA4(compute_capability)) {
+             const float alpha = 1.0f;
+             const float beta = 0.0f;
+             CUBLAS_CHECK(
+@@ -1756,10 +1756,16 @@ static void ggml_cuda_mul_mat_batched_cublas(ggml_backend_cuda_context & ctx, co
+         beta  = &beta_f32;
+     }
+ 
+-    if (GGML_CUDA_CC_IS_CDNA(ggml_cuda_info().devices[ctx.device].cc)) {
++    const int compute_capability = ggml_cuda_info().devices[ctx.device].cc;
++    if (GGML_CUDA_CC_IS_CDNA(compute_capability)) {
+         cu_compute_type = CUBLAS_COMPUTE_32F;
+         alpha = &alpha_f32;
+         beta  = &beta_f32;
++
++        if (GGML_CUDA_CC_IS_RDNA4(compute_capability)) {
++            dst_t = (char *) dst_ddf;
++            cu_data_type = CUDA_R_32F;
++        }
+     }
+ 
+     GGML_ASSERT(ne12 % ne02 == 0);
+@@ -1833,7 +1839,7 @@ static void ggml_cuda_mul_mat_batched_cublas(ggml_backend_cuda_context & ctx, co
+     }
+ #endif
+ 
+-    if (dst->op_params[0] == GGML_PREC_DEFAULT) {
++    if (dst->op_params[0] == GGML_PREC_DEFAULT && cu_data_type == CUDA_R_16F) {
+         const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
+         to_fp32_cuda(dst_f16.get(), dst_ddf, ne_dst, main_stream);
+     }
+diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
+index 10f2ebb1..933d945c 100644
+--- a/ggml/src/ggml-cuda/mmq.cu
++++ b/ggml/src/ggml-cuda/mmq.cu
+@@ -149,5 +149,5 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
+         return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
+     }
+ 
+-    return (!GGML_CUDA_CC_IS_RDNA3(cc) && !GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
++    return (!GGML_CUDA_CC_IS_RDNA4(cc) && !GGML_CUDA_CC_IS_RDNA3(cc) && !GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
+ }
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index 0451c65f..66ce2bc9 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -2577,9 +2577,9 @@ static __device__ void mul_mat_q_process_tile(
+ 
+ template <ggml_type type, int mmq_x, int nwarps, bool need_check>
+ #if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
+-#if defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
++#if defined(RDNA4) || defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
+     __launch_bounds__(WARP_SIZE*nwarps, 2)
+-#endif // defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
++#endif // defined(RDNA4) || defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
+ #else
+ #if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+     __launch_bounds__(WARP_SIZE*nwarps, 1)
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index 4fb466ca..7c1ef97d 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -62,13 +62,13 @@ static __global__ void mul_mat_vec_q(
+ 
+     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+ 
+-#if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__) && (defined(RDNA2) || defined(RDNA3))
++#if defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__) && (defined(RDNA2) || defined(RDNA3) || defined(RDNA4))
+     constexpr int nwarps              = 1;
+     constexpr int rows_per_cuda_block = 1;
+ #else
+     constexpr int nwarps              = ncols_y <= 4 ? 4 : 2;
+     constexpr int rows_per_cuda_block = ncols_y == 1 ? 1 : 2;
+-#endif // defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__) && !defined(RDNA2) && !defined(RDNA3)
++#endif // defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__) && (defined(RDNA2) || defined(RDNA3) || defined(RDNA4))
+ 
+     const     int tid = WARP_SIZE*threadIdx.y + threadIdx.x;
+     const     int row0 = rows_per_cuda_block*blockIdx.x;
+diff --git a/ggml/src/ggml-cuda/vendors/hip.h b/ggml/src/ggml-cuda/vendors/hip.h
+index 81964611..a62544b5 100644
+--- a/ggml/src/ggml-cuda/vendors/hip.h
++++ b/ggml/src/ggml-cuda/vendors/hip.h
+@@ -150,6 +150,10 @@
+ #define CDNA
+ #endif
+ 
++#if defined(__gfx1200__) || defined(__gfx1201__)
++#define RDNA4
++#endif
++
+ #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__) || \
+     defined(__gfx1150__) || defined(__gfx1151__)
+ #define RDNA3
