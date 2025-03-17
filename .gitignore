@@ -11,6 +11,7 @@ build
 .idea
 test_data
 *.crt
+*.patched
 __debug_bin*
 llama/build
 llama/vendor
