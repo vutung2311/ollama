@@ -1,0 +1,79 @@
+# vim: filetype=dockerfile
+
+ARG FLAVOR=${TARGETARCH}
+
+ARG ROCMVERSION=6.3.3
+ARG JETPACK5VERSION=r35.4.1
+ARG JETPACK6VERSION=r36.4.0
+ARG CMAKEVERSION=3.31.2
+
+# CUDA v11 requires gcc v10.  v10.3 has regressions, so the rockylinux 8.5 AppStream has the latest compatible version
+FROM --platform=linux/amd64 rocm/dev-almalinux-8:${ROCMVERSION}-complete AS base-amd64
+RUN yum install -y yum-utils \
+    && yum-config-manager --add-repo https://dl.rockylinux.org/vault/rocky/8.5/AppStream/\$basearch/os/ \
+    && rpm --import https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-8 \
+    && dnf install -y yum-utils ccache gcc-toolset-10-gcc-10.2.1-8.2.el8 gcc-toolset-10-gcc-c++-10.2.1-8.2.el8 gcc-toolset-10-binutils-2.35-11.el8
+ENV PATH=/opt/rh/gcc-toolset-10/root/usr/bin:$PATH
+
+FROM --platform=linux/arm64 almalinux:8 AS base-arm64
+# install epel-release for ccache
+RUN yum install -y yum-utils epel-release \
+    && dnf install -y clang ccache
+ENV CC=clang CXX=clang++
+
+FROM base-${TARGETARCH} AS base
+ARG CMAKEVERSION
+RUN curl -fsSL https://github.com/Kitware/CMake/releases/download/v${CMAKEVERSION}/cmake-${CMAKEVERSION}-linux-$(uname -m).tar.gz | tar xz -C /usr/local --strip-components 1
+COPY CMakeLists.txt CMakePresets.json .
+COPY ml/backend/ggml/ggml ml/backend/ggml/ggml
+ENV LDFLAGS=-s
+
+FROM base AS cpu
+RUN dnf install -y gcc-toolset-11-gcc gcc-toolset-11-gcc-c++
+ENV PATH=/opt/rh/gcc-toolset-11/root/usr/bin:$PATH
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake --preset 'CPU' \
+        && cmake --build --parallel --preset 'CPU' \
+        && cmake --install build --component CPU --strip --parallel $(nproc)
+
+FROM base AS rocm-6
+ENV PATH=/opt/rocm/hcc/bin:/opt/rocm/hip/bin:/opt/rocm/bin:/opt/rocm/hcc/bin:$PATH
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake --preset="Default" \
+      -DAMDGPU_TARGETS=gfx1201 \
+      -DCMAKE_HIP_PLATFORM=amd \
+    && cmake --build build --preset 'ROCm 6' --parallel -j $(nproc) \
+    && cmake --install build --component HIP --strip --parallel $(nproc)
+
+FROM base AS build
+WORKDIR /go/src/github.com/ollama/ollama
+COPY go.mod go.sum .
+RUN curl -fsSL https://golang.org/dl/go$(awk '/^go/ { print $2 }' go.mod).linux-$(case $(uname -m) in x86_64) echo amd64 ;; aarch64) echo arm64 ;; esac).tar.gz | tar xz -C /usr/local
+ENV PATH=/usr/local/go/bin:$PATH
+RUN go mod download
+COPY . .
+ARG GOFLAGS="'-ldflags=-w -s'"
+ENV CGO_ENABLED=1
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -buildmode=pie -o /bin/ollama .
+
+FROM scratch AS rocm
+COPY --from=rocm-6 dist/lib/ollama/rocm /lib/ollama/rocm
+
+FROM rocm AS archive
+COPY --from=cpu dist/lib/ollama /lib/ollama
+COPY --from=build /bin/ollama /bin/ollama
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=archive /bin /usr/bin
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=archive /lib/ollama /usr/lib/ollama
+ENV ROCBLAS_USE_HIPBLASLT=0
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]
