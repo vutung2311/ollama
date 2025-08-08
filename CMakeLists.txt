@@ -109,6 +109,7 @@ if(CMAKE_HIP_COMPILER)
 
     if(AMDGPU_TARGETS)
         find_package(hip REQUIRED)
+        find_package(amd_comgr REQUIRED)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-hip)
 
         if (WIN32)
@@ -117,6 +118,15 @@ if(CMAKE_HIP_COMPILER)
 
         target_compile_definitions(ggml-hip PRIVATE GGML_HIP_NO_VMM)
 
+        set(OLLAMA_HIP_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/lib/ollama/rocm)
+        if (UNIX AND NOT APPLE)
+            set_target_properties(ggml-hip PROPERTIES
+                BUILD_RPATH "$ORIGIN:${OLLAMA_BUILD_DIR}"
+                INSTALL_RPATH "$ORIGIN:$ORIGIN/rocm"
+                BUILD_WITH_INSTALL_RPATH FALSE
+                INSTALL_RPATH_USE_LINK_PATH FALSE
+            )
+        endif()
         install(TARGETS ggml-hip
             RUNTIME_DEPENDENCY_SET rocm
             RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT HIP
@@ -124,16 +134,16 @@ if(CMAKE_HIP_COMPILER)
         )
         install(RUNTIME_DEPENDENCY_SET rocm
                 DIRECTORIES ${HIP_BIN_INSTALL_DIR} ${HIP_LIB_INSTALL_DIR}
-                PRE_INCLUDE_REGEXES hipblas rocblas amdhip64 rocsolver amd_comgr hsa-runtime64 rocsparse tinfo rocprofiler-register drm drm_amdgpu numa elf
-                PRE_EXCLUDE_REGEXES ".*"
-                POST_EXCLUDE_REGEXES "system32"
-            RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT HIP
-            LIBRARY DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT HIP
+                POST_EXCLUDE_REGEXES
+                [=[.*system32\/.*\.dll]=]
+                [[libc\.so\..*]] [[libgcc_s\.so\..*]] [[libm\.so\..*]] [[libstdc\+\+\.so\..*]]
+            RUNTIME DESTINATION ${OLLAMA_HIP_INSTALL_DIR} COMPONENT HIP
+            LIBRARY DESTINATION ${OLLAMA_HIP_INSTALL_DIR} COMPONENT HIP
         )
 
         foreach(HIP_LIB_BIN_INSTALL_DIR IN ITEMS ${HIP_BIN_INSTALL_DIR} ${HIP_LIB_INSTALL_DIR})
             if(EXISTS ${HIP_LIB_BIN_INSTALL_DIR}/rocblas)
-                install(DIRECTORY ${HIP_LIB_BIN_INSTALL_DIR}/rocblas DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT HIP)
+                install(DIRECTORY ${HIP_LIB_BIN_INSTALL_DIR}/rocblas DESTINATION ${OLLAMA_HIP_INSTALL_DIR} COMPONENT HIP)
                 break()
             endif()
         endforeach()
