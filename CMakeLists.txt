@@ -99,6 +99,7 @@ if(CMAKE_HIP_COMPILER)
     set(HIP_PLATFORM "amd")
 
     find_package(hip REQUIRED)
+    find_package(amd_comgr REQUIRED)
     if(NOT AMDGPU_TARGETS)
         list(FILTER AMDGPU_TARGETS INCLUDE REGEX "^gfx(900|94[012]|101[02]|1030|110[012]|120[01])$")
     elseif(WIN32 AND WINDOWS_AMDGPU_TARGETS_EXCLUDE_REGEX)
@@ -106,6 +107,7 @@ if(CMAKE_HIP_COMPILER)
     endif()
 
     if(AMDGPU_TARGETS)
+        set(GPU_TARGETS ${AMDGPU_TARGETS})
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/ml/backend/ggml/ggml/src/ggml-hip)
 
         if (WIN32)
@@ -115,6 +117,7 @@ if(CMAKE_HIP_COMPILER)
         target_compile_definitions(ggml-hip PRIVATE GGML_HIP_NO_VMM)
 
         set(OLLAMA_HIP_INSTALL_DIR ${OLLAMA_INSTALL_DIR}/rocm)
+        target_link_libraries(ggml-hip PRIVATE amd_comgr)
         install(TARGETS ggml-hip
             RUNTIME_DEPENDENCY_SET rocm
             RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT HIP
@@ -122,9 +125,9 @@ if(CMAKE_HIP_COMPILER)
         )
         install(RUNTIME_DEPENDENCY_SET rocm
                 DIRECTORIES ${HIP_BIN_INSTALL_DIR} ${HIP_LIB_INSTALL_DIR}
-                PRE_INCLUDE_REGEXES hipblas rocblas amdhip64 rocsolver amd_comgr hsa-runtime64 rocsparse tinfo rocprofiler-register drm drm_amdgpu numa elf
-                PRE_EXCLUDE_REGEXES ".*"
-                POST_EXCLUDE_REGEXES "system32"
+                POST_EXCLUDE_REGEXES
+                [=[.*system32\/.*\.dll]=]
+                [[libc\.so\..*]] [[libgcc_s\.so\..*]] [[libm\.so\..*]] [[libstdc\+\+\.so\..*]]
             RUNTIME DESTINATION ${OLLAMA_HIP_INSTALL_DIR} COMPONENT HIP
             LIBRARY DESTINATION ${OLLAMA_HIP_INSTALL_DIR} COMPONENT HIP
         )
@@ -135,5 +138,23 @@ if(CMAKE_HIP_COMPILER)
                 break()
             endif()
         endforeach()
+
+        install(CODE "
+            file(GLOB _comgr_libs \"${OLLAMA_HIP_INSTALL_DIR}/libamd_comgr.so.*\")
+
+            foreach(_lib IN LISTS _comgr_libs)
+                get_filename_component(_name \"\${_lib}\" NAME)
+                if(_name MATCHES \"^libamd_comgr\\\\.so\\\\.[0-9]+\")
+                    # Now create the symlink at install time when the target exists
+                    file(CREATE_LINK
+                        \"\${_name}\"
+                        \"${OLLAMA_HIP_INSTALL_DIR}/libamd_comgr.so\"
+                        SYMBOLIC
+                    )
+                    message(STATUS \"Created symlink: libamd_comgr.so -> \${_name}\")
+                    break()
+                endif()
+            endforeach()
+        " COMPONENT HIP)
     endif()
 endif()
